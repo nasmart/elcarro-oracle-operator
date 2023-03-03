@@ -27,6 +27,7 @@ import (
 	"time"
 
 	secretmanager "cloud.google.com/go/secretmanager/apiv1"
+	"cloud.google.com/go/secretmanager/apiv1/secretmanagerpb"
 	"github.com/GoogleCloudPlatform/elcarro-oracle-operator/oracle/controllers/standbyhelpers"
 	"github.com/GoogleCloudPlatform/elcarro-oracle-operator/oracle/pkg/agents/backup"
 	"github.com/GoogleCloudPlatform/elcarro-oracle-operator/oracle/pkg/agents/common/sql"
@@ -35,7 +36,6 @@ import (
 	"github.com/GoogleCloudPlatform/elcarro-oracle-operator/oracle/pkg/agents/standby"
 	"github.com/GoogleCloudPlatform/elcarro-oracle-operator/oracle/pkg/database/provision"
 	"github.com/GoogleCloudPlatform/elcarro-oracle-operator/oracle/pkg/util/secret"
-	secretmanagerpb "google.golang.org/genproto/googleapis/cloud/secretmanager/v1"
 	lropb "google.golang.org/genproto/googleapis/longrunning"
 	"google.golang.org/protobuf/types/known/timestamppb"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -58,6 +58,10 @@ var (
 		return client, client.Close, nil
 	}
 )
+
+var overrideParamTypeStatic = map[string]bool{
+	"sga_target": true,
+}
 
 // GetLROOperation returns LRO operation for the specified namespace instance and operation id.
 func GetLROOperation(ctx context.Context, dbClientFactory DatabaseClientFactory, r client.Reader, id, namespace, instName string) (*lropb.Operation, error) {
@@ -167,7 +171,7 @@ func BounceDatabase(ctx context.Context, r client.Reader, dbClientFactory Databa
 	}
 	defer closeConn()
 
-	klog.InfoS("config_agent_helpers/BounceDatabase", "client", dbClient)
+	klog.InfoS("config_agent_helpers/BounceDatabase shutting down database")
 	_, err = dbClient.BounceDatabase(ctx, &dbdpb.BounceDatabaseRequest{
 		Operation:    dbdpb.BounceDatabaseRequest_SHUTDOWN,
 		DatabaseName: req.Sid,
@@ -253,7 +257,7 @@ func CreateDatabase(ctx context.Context, r client.Reader, dbClientFactory Databa
 		return "", fmt.Errorf("config_agent_helpers/CreateDatabase: failed to create database daemon dbdClient: %v", err)
 	}
 	defer closeConn()
-	klog.InfoS("config_agent_helpers/CreateDatabase", "dbClient", dbClient)
+	klog.InfoS("config_agent_helpers/CreateDatabase: checking CDB state")
 
 	_, err = dbClient.CheckDatabaseState(ctx, &dbdpb.CheckDatabaseStateRequest{IsCdb: true, DatabaseName: req.CdbName, DbDomain: req.DbDomain})
 	if err != nil {
@@ -538,7 +542,7 @@ func SetParameter(ctx context.Context, dbClientFactory DatabaseClientFactory, r 
 	}
 
 	isStatic := false
-	if paramType == "FALSE" {
+	if paramType == "FALSE" || overrideParamTypeStatic[key] {
 		klog.InfoS("config_agent_helpers/SetParameter", "parameter_type", "STATIC")
 		command = fmt.Sprintf("%s scope=spfile", command)
 		isStatic = true
@@ -694,7 +698,7 @@ func CreateUsers(ctx context.Context, r client.Reader, dbClientFactory DatabaseC
 		return "", fmt.Errorf("config_agent_helpers/CreateUsers: failed to create database daemon client: %v", err)
 	}
 	defer closeConn()
-	klog.InfoS("config_agent_helpers/CreateUsers", "client", dbClient)
+	klog.InfoS("config_agent_helpers/CreateUsers: checking CDB state")
 
 	_, err = dbClient.CheckDatabaseState(ctx, &dbdpb.CheckDatabaseStateRequest{IsCdb: true, DatabaseName: req.CdbName, DbDomain: req.DbDomain})
 	if err != nil {
@@ -863,7 +867,7 @@ func BootstrapStandby(ctx context.Context, r client.Reader, dbClientFactory Data
 		return nil, fmt.Errorf("config_agent_helpers/BootstrapStandby: failed to create database daemon client: %v", err)
 	}
 	defer closeConn()
-	klog.InfoS("BootstrapStandby", "client", dbClient)
+	klog.InfoS("BootstrapStandby running")
 	if err := standby.BootstrapStandby(ctx, dbClient); err != nil {
 		return nil, fmt.Errorf("config_agent_helpers/BootstrapStandby: failed to bootstrap standby database : %v", err)
 	}
@@ -918,7 +922,7 @@ func CreateListener(ctx context.Context, r client.Reader, dbClientFactory Databa
 		return fmt.Errorf("config_agent_helpers/CreateListener: failed to create listener: %v", err)
 	}
 	defer closeConn()
-	klog.InfoS("config_agent_helpers/CreateListener", "dbClient", dbClient)
+	klog.InfoS("config_agent_helpers/CreateListener: creating listener")
 
 	_, err = dbClient.CreateListener(ctx, &dbdpb.CreateListenerRequest{
 		DatabaseName: req.Name,
@@ -1016,7 +1020,7 @@ func PhysicalBackup(ctx context.Context, r client.Reader, dbClientFactory Databa
 		return nil, fmt.Errorf("config_agent_helpers/PhysicalBackup: failed to create database daemon client: %v", err)
 	}
 	defer closeConn()
-	klog.InfoS("config_agent_helpers/PhysicalBackup", "dbClient", dbClient)
+	klog.InfoS("config_agent_helpers/PhysicalBackup: creating physical backup")
 
 	sectionSize := resource.NewQuantity(int64(req.SectionSize), resource.DecimalSI)
 	return backup.PhysicalBackup(ctx, &backup.Params{
@@ -1119,7 +1123,7 @@ func CheckStatus(ctx context.Context, r client.Reader, dbClientFactory DatabaseC
 		return nil, fmt.Errorf("config_agent_helpers/CheckStatus: failed to create database daemon client: %v", err)
 	}
 	defer closeConn()
-	klog.V(1).InfoS("config_agent_helpers/CheckStatus", "client", dbClient)
+	klog.V(1).InfoS("config_agent_helpers/CheckStatus: checking if provisioning file exists")
 
 	resp, err := dbClient.FileExists(ctx, &dbdpb.FileExistsRequest{Name: consts.ProvisioningDoneFile})
 	if err != nil {
