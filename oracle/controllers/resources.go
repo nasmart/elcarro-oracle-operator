@@ -25,7 +25,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/elcarro-oracle-operator/oracle/pkg/k8s/ownerref"
 	"github.com/go-logr/logr"
-	snapv1 "github.com/kubernetes-csi/external-snapshotter/v2/pkg/apis/volumesnapshot/v1beta1"
+	snapv1 "github.com/kubernetes-csi/external-snapshotter/client/v4/apis/volumesnapshot/v1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -305,7 +305,12 @@ func NewPVCs(sp StsParams) ([]corev1.PersistentVolumeClaim, error) {
 			configSpec = &sp.Config.Spec.ConfigSpec
 		}
 		rl := corev1.ResourceList{corev1.ResourceStorage: utils.FindDiskSize(&diskSpec, configSpec, DefaultDiskSpecs, defaultDiskSize)}
-		pvcName, mount := GetPVCNameAndMount(sp.Inst.Name, diskSpec.Name)
+		var pvcName, mount string
+		if IsReservedDiskName(diskSpec.Name) {
+			pvcName, mount = GetPVCNameAndMount(sp.Inst.Name, diskSpec.Name)
+		} else {
+			pvcName, mount = GetCustomPVCNameAndMount(sp.Inst, diskSpec.Name)
+		}
 		var pvc corev1.PersistentVolumeClaim
 
 		// Determine storage class (from disk spec or config)
@@ -365,7 +370,12 @@ func buildPVCMounts(sp StsParams) []corev1.VolumeMount {
 	var diskMounts []corev1.VolumeMount
 
 	for _, diskSpec := range sp.Disks {
-		pvcName, mount := GetPVCNameAndMount(sp.Inst.Name, diskSpec.Name)
+		var pvcName, mount string
+		if IsReservedDiskName(diskSpec.Name) {
+			pvcName, mount = GetPVCNameAndMount(sp.Inst.Name, diskSpec.Name)
+		} else {
+			pvcName, mount = GetCustomPVCNameAndMount(sp.Inst, diskSpec.Name)
+		}
 		diskMounts = append(diskMounts, corev1.VolumeMount{
 			Name:      pvcName,
 			MountPath: fmt.Sprintf("/%s", mount),
@@ -376,7 +386,9 @@ func buildPVCMounts(sp StsParams) []corev1.VolumeMount {
 }
 
 // NewPodTemplate returns the pod template for the database statefulset.
-func NewPodTemplate(sp StsParams, cdbName, DBDomain string) corev1.PodTemplateSpec {
+func NewPodTemplate(sp StsParams, inst v1alpha1.Instance) corev1.PodTemplateSpec {
+	cdbName := inst.Spec.CDBName
+	DBDomain := GetDBDomain(&inst)
 	labels := map[string]string{
 		"instance":    sp.Inst.Name,
 		"statefulset": sp.StsName,
@@ -532,11 +544,6 @@ func NewPodTemplate(sp StsParams, cdbName, DBDomain string) corev1.PodTemplateSp
 		},
 	}
 
-	var antiAffinityNamespaces []string
-	if sp.Config != nil && len(sp.Config.Spec.HostAntiAffinityNamespaces) != 0 {
-		antiAffinityNamespaces = sp.Config.Spec.HostAntiAffinityNamespaces
-	}
-
 	uid := sp.Inst.Spec.DatabaseUID
 	if uid == nil {
 		sp.Log.Info("set pod user ID to default value", "UID", DefaultUID)
@@ -565,30 +572,17 @@ func NewPodTemplate(sp StsParams, cdbName, DBDomain string) corev1.PodTemplateSp
 			RunAsNonRoot: func(b bool) *bool { return &b }(true),
 		},
 		// ImagePullSecrets: []corev1.LocalObjectReference {{Name: GcrSecretName }},
-		// InitContainers: initContainers,
 		Containers:            containers,
 		InitContainers:        initContainers,
 		ShareProcessNamespace: func(b bool) *bool { return &b }(true),
 		// ServiceAccountName:
 		// TerminationGracePeriodSeconds:
-		// Tolerations:
-		Volumes: volumes,
-		Affinity: &corev1.Affinity{
-			PodAntiAffinity: &corev1.PodAntiAffinity{
-				RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{
-					{
-						LabelSelector: &metav1.LabelSelector{
-							MatchLabels: map[string]string{"task-type": DatabaseTaskType},
-						},
-						Namespaces:  antiAffinityNamespaces,
-						TopologyKey: "kubernetes.io/hostname",
-					},
-				},
-			},
-		},
+		Tolerations: inst.Spec.PodSpec.Tolerations,
+		Volumes:     volumes,
+		Affinity:    inst.Spec.PodSpec.Affinity,
 	}
 
-	// TODO(bdali): consider adding pod affinity, priority class name, secret mount.
+	// TODO(bdali): consider adding priority class name, secret mount.
 
 	return corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{

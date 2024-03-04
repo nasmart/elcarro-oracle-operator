@@ -37,7 +37,7 @@ import (
 
 	"cloud.google.com/go/storage"
 	"github.com/bazelbuild/rules_go/go/tools/bazel"
-	snapv1 "github.com/kubernetes-csi/external-snapshotter/v2/pkg/apis/volumesnapshot/v1beta1"
+	snapv1 "github.com/kubernetes-csi/external-snapshotter/client/v4/apis/volumesnapshot/v1"
 	. "github.com/onsi/ginkgo"
 	ginkgoconfig "github.com/onsi/ginkgo/config"
 	. "github.com/onsi/gomega"
@@ -437,29 +437,6 @@ func EnableIamApi() {
 	cmd := exec.Command("gcloud", "services", "enable", "iamcredentials.googleapis.com", fmt.Sprintf("--project=%s", projectId))
 	out, err := cmd.CombinedOutput()
 	log.Printf("gcloud services enable iamcredentials.googleapis.com output=%s", string(out))
-	Expect(err).NotTo(HaveOccurred())
-}
-
-// EnableWiWithNodePool ensures workload identity enabled for PROW_CLUSTER.
-func EnableWiWithNodePool() {
-	log := logg.New(GinkgoWriter, "", 0)
-
-	projectId := os.Getenv("PROW_PROJECT")
-	targetCluster := os.Getenv("PROW_CLUSTER")
-	targetZone := os.Getenv("PROW_CLUSTER_ZONE")
-	Expect(projectId).ToNot(BeEmpty())
-	Expect(targetCluster).ToNot(BeEmpty())
-	Expect(targetZone).NotTo(BeEmpty())
-
-	// Enable workload identify on existing cluster.
-	cmd := exec.Command("gcloud", "container", "clusters", "update", targetCluster, "--workload-pool="+projectId+".svc.id.goog", "--zone="+targetZone, fmt.Sprintf("--project=%s", projectId))
-	out, err := cmd.CombinedOutput()
-	log.Printf("gcloud container clusters update output=%s", string(out))
-	Expect(err).NotTo(HaveOccurred())
-	// Migrate applications to Workload Identity with Node pool modification.
-	cmd = exec.Command("gcloud", "container", "node-pools", "update", "default-pool", "--cluster="+targetCluster, "--workload-metadata=GKE_METADATA", "--zone="+targetZone, fmt.Sprintf("--project=%s", projectId))
-	out, err = cmd.CombinedOutput()
-	log.Printf("gcloud container node-pools update output=%s", string(out))
 	Expect(err).NotTo(HaveOccurred())
 }
 
@@ -908,6 +885,18 @@ func TestImageForVersion(version string, edition string, extra string) string {
 				}
 			}
 		}
+	case "FREE":
+		{
+			switch version {
+			case "23c":
+				{
+					switch extra {
+					default:
+						return os.Getenv("TEST_IMAGE_ORACLE_23_FREE_SEEDED")
+					}
+				}
+			}
+		}
 	case "EE":
 		{
 			switch version {
@@ -936,13 +925,19 @@ func TestImageForVersion(version string, edition string, extra string) string {
 // 'version' and 'edition' should match rules of TestImageForVersion().
 // Depends on the Ginkgo asserts.
 func CreateSimpleInstance(k8sEnv K8sOperatorEnvironment, instanceName string, version string, edition string) {
+	cdbName := "GCLOUD"
+	// Free edition only allows a CDB named 'FREE'
+	if edition == "FREE" {
+		cdbName = "FREE"
+	}
+
 	instance := &v1alpha1.Instance{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      instanceName,
 			Namespace: k8sEnv.DPNamespace,
 		},
 		Spec: v1alpha1.InstanceSpec{
-			CDBName: "GCLOUD",
+			CDBName: cdbName,
 			InstanceSpec: commonv1alpha1.InstanceSpec{
 				Version: version,
 				Disks: []commonv1alpha1.DiskSpec{
@@ -1211,7 +1206,8 @@ Depends on the Ginkgo asserts.
 Please escape any bash special characters.
 */
 func K8sExecuteSql(pod string, ns string, sql string) (string, error) {
-	cmd := fmt.Sprintf(`source ~/GCLOUD.env && sqlplus -S / as sysdba <<EOF
+	// source both FREE.env and GCLOUD.env to cover both EE and Free test cases
+	cmd := fmt.Sprintf(`[[ -f ~/GCLOUD.env ]] && source ~/GCLOUD.env; [[ -f ~/FREE.env ]] && source ~/FREE.env; sqlplus -S / as sysdba <<EOF
 whenever sqlerror exit sql.sqlcode;
 set pagesize 0
 set feedback off
@@ -1243,7 +1239,7 @@ func K8sExecuteSqlOrFail(pod, ns, sql string) string {
 func K8sVerifyUserConnectivity(pod, ns, pdb string, userCred map[string]string) {
 	for user, password := range userCred {
 		Eventually(func() bool {
-			cmd := fmt.Sprintf(`cd ~ && source ~/GCLOUD.env && sqlplus -S %s/%s@localhost:6021/%s <<EOF
+			cmd := fmt.Sprintf(`cd ~ && [[ -f ~/GCLOUD.env ]] && source ~/GCLOUD.env; [[ -f ~/FREE.env ]] && source ~/FREE.env; sqlplus -S %s/%s@localhost:6021/%s <<EOF
 whenever sqlerror exit sql.sqlcode
 set pagesize 0
 set feedback off
@@ -1270,7 +1266,8 @@ EOF
 // Helper functions for functional and integration tests.
 // Uses ginkgo asserts.
 
-const RetryTimeout = time.Second * 5
+// Should be long enough to handle GKE flakes like 'Internal Server Error 500: the server is currently unable to handle the request'
+const RetryTimeout = time.Minute * 1
 const RetryLongTimeout = time.Minute * 5
 const RetryInterval = time.Second * 1
 

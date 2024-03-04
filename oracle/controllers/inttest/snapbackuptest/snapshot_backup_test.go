@@ -18,7 +18,7 @@ import (
 	"testing"
 	"time"
 
-	snapv1 "github.com/kubernetes-csi/external-snapshotter/v2/pkg/apis/volumesnapshot/v1beta1"
+	snapv1 "github.com/kubernetes-csi/external-snapshotter/client/v4/apis/volumesnapshot/v1"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -156,6 +156,10 @@ var _ = Describe("Backup through snapshot", func() {
 
 	Context("Oracle 18c XE", func() {
 		snapBackupTest("18c", "XE")
+	})
+
+	Context("Oracle 23c FREE", func() {
+		snapBackupTest("23c", "FREE")
 	})
 })
 

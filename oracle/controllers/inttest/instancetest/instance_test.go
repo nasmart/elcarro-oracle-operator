@@ -58,6 +58,7 @@ var _ = Describe("Instance and Database provisioning", func() {
 	var firstDatabaseName string
 	var secondDatabaseName string
 	var cdbName string
+	podSpecLabel := "int-test-pod-spec"
 
 	//Call Init with 'namespace' as both the namespace to install the operator, and the namespace for the operator to monitor.
 	BeforeEach(func() {
@@ -93,9 +94,9 @@ var _ = Describe("Instance and Database provisioning", func() {
 			dbTimeout += 5 * time.Minute // Add some buffer time given that this test runs in a different process space than the instance
 
 			By("By creating two new Instances")
-			createInstance(firstInstanceName, cdbName, namespace, version, edition, extra, true)
+			createInstance(firstInstanceName, cdbName, namespace, version, edition, podSpecLabel, extra, true)
 			instKey1 := client.ObjectKey{Namespace: namespace, Name: firstInstanceName}
-			createInstance(secondInstanceName, cdbName, namespace, version, edition, extra, false)
+			createInstance(secondInstanceName, cdbName, namespace, version, edition, podSpecLabel, extra, false)
 			instKey2 := client.ObjectKey{Namespace: namespace, Name: secondInstanceName}
 
 			By("By checking that Instance is created")
@@ -137,6 +138,24 @@ var _ = Describe("Instance and Database provisioning", func() {
 			var svc corev1.ServiceList
 			Expect(k8sClient.List(ctx, &svc, client.InNamespace(namespace))).Should(Succeed())
 			Expect(len(svc.Items)).Should(Equal(4)) // 2 services (LB, DBDaemon) per instance
+			By("By Checking the PodSpec Field Is Propagated down to the Pod")
+			testhelpers.WaitForInstanceConditionState(k8sEnv, instKey1, k8s.Ready, metav1.ConditionTrue, k8s.CreateComplete, 25*time.Minute)
+			stsPod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      instancecontroller.GetSTSName(firstInstanceName) + "-0",
+					Namespace: namespace,
+				},
+			}
+			testhelpers.K8sGetWithRetry(k8sEnv.K8sClient, ctx, client.ObjectKeyFromObject(stsPod), stsPod)
+			podSpecLabelNames := []string{}
+			for _, podAffinity := range stsPod.Spec.Affinity.PodAntiAffinity.PreferredDuringSchedulingIgnoredDuringExecution {
+				val, ok := podAffinity.PodAffinityTerm.LabelSelector.MatchLabels["task-type"]
+				if ok {
+					podSpecLabelNames = append(podSpecLabelNames, val)
+				}
+			}
+			Expect(podSpecLabelNames).Should(ContainElements(podSpecLabel))
+
 			By("By checking that the Instance can be stopped")
 			testhelpers.WaitForInstanceConditionState(k8sEnv, instKey1, k8s.Ready, metav1.ConditionTrue, k8s.CreateComplete, 25*time.Minute)
 			createdInstance1 := &v1alpha1.Instance{}
@@ -151,13 +170,23 @@ var _ = Describe("Instance and Database provisioning", func() {
 			By("Checking that the sts replicas were scaled down to 0")
 			sts1 := &appsv1.StatefulSet{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      fmt.Sprintf(controllers.StsName, createdInstance1.Name),
+					Name:      instancecontroller.GetSTSName(firstInstanceName),
 					Namespace: namespace,
 				},
 			}
 			testhelpers.K8sGetWithLongRetry(k8sClient, ctx, client.ObjectKeyFromObject(sts1), sts1)
-
 			Expect(*sts1.Spec.Replicas).Should(Equal(int32(controllers.StoppedReplicaCnt)))
+
+			By("Checking that the monitoring deployment replicas were scaled down to 0")
+			monitoringDep1 := &appsv1.Deployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      instancecontroller.GetMonitoringDepName(firstInstanceName),
+					Namespace: namespace,
+				},
+			}
+			testhelpers.K8sGetWithLongRetry(k8sClient, ctx, client.ObjectKeyFromObject(monitoringDep1), monitoringDep1)
+			Expect(*monitoringDep1.Spec.Replicas).Should(Equal(int32(controllers.StoppedReplicaCnt)))
+
 			By("Checking that the instance can be started")
 			createdInstance1 = &v1alpha1.Instance{}
 			testhelpers.K8sUpdateWithRetry(k8sEnv.K8sClient, k8sEnv.Ctx,
@@ -168,10 +197,17 @@ var _ = Describe("Instance and Database provisioning", func() {
 					instanceToUpdate.Spec.IsStopped = pointer.Bool(false)
 				})
 
-			By("Checking that the sts replicas were scaled up to 1")
+			By("Checking that the sts replicas were scaled up to the default replica count")
 			testhelpers.WaitForInstanceConditionState(k8sEnv, instKey1, k8s.Ready, metav1.ConditionTrue, k8s.CreateComplete, 25*time.Minute)
 			testhelpers.K8sGetWithLongRetry(k8sClient, ctx, client.ObjectKeyFromObject(sts1), sts1)
 			Expect(*sts1.Spec.Replicas).Should(Equal(int32(controllers.DefaultReplicaCnt)))
+
+			By("Checking that the monitoring deployment replicas were scaled up to the default replica count")
+			testhelpers.WaitForInstanceConditionState(k8sEnv, instKey1, k8s.Ready, metav1.ConditionTrue, k8s.CreateComplete, 25*time.Minute)
+			Eventually(func() bool {
+				testhelpers.K8sGetWithRetry(k8sClient, ctx, client.ObjectKeyFromObject(monitoringDep1), monitoringDep1)
+				return *monitoringDep1.Spec.Replicas == int32(controllers.DefaultReplicaCnt)
+			}, time.Minute*25, time.Minute).Should(BeTrue())
 
 			By("By checking that the datadisk and log disk get resized")
 			testhelpers.WaitForInstanceConditionState(k8sEnv, instKey1, k8s.Ready, metav1.ConditionTrue, k8s.CreateComplete, 25*time.Minute)
@@ -230,7 +266,7 @@ var _ = Describe("Instance and Database provisioning", func() {
 					instanceToUpdate.Spec.DatabaseResources.Requests["memory"] = resource.MustParse("9Gi")
 					instanceToUpdate.Spec.DatabaseResources.Requests["cpu"] = resource.MustParse("3m")
 				})
-			stsPod := &corev1.Pod{
+			stsPod = &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      sts1.Name + "-0",
 					Namespace: namespace,
@@ -253,7 +289,7 @@ var _ = Describe("Instance and Database provisioning", func() {
 				updatedInstance := &v1alpha1.Instance{}
 				Expect(k8sClient.Get(ctx, client.ObjectKey{Name: firstInstanceName, Namespace: namespace}, updatedInstance)).Should(Succeed())
 				return updatedInstance.Status.DatabaseNames, nil
-			}, 2*time.Minute, 5*time.Second).Should(BeEmpty())
+			}, 10*time.Minute, 5*time.Second).Should(BeEmpty())
 
 			By("Checking that only PVCs for the first instance are retained")
 			deleteInstance(ctx, firstInstanceName, namespace)
@@ -289,6 +325,10 @@ var _ = Describe("Instance and Database provisioning", func() {
 		TestInstanceCreationAndDatabaseProvisioning("18c", "XE", "", true)
 	})
 
+	Context("Oracle 23c FREE", func() {
+		TestInstanceCreationAndDatabaseProvisioning("23c", "FREE", "", true)
+	})
+
 	// Slow tests, only run in Canary
 	if testhelpers.IsCanaryJob() {
 		Context("Oracle 19.3 EE unseeded", func() {
@@ -302,7 +342,11 @@ var _ = Describe("Instance and Database provisioning", func() {
 	}
 })
 
-func createInstance(instanceName, cdbName, namespace, version, edition, extra string, retainDisksOnDelete bool) {
+func createInstance(instanceName, cdbName, namespace, version, edition, podSpecLabel, extra string, retainDisksOnDelete bool) {
+	// Free edition only allows a CDB named 'FREE'
+	if edition == "FREE" {
+		cdbName = "FREE"
+	}
 	instance := &v1alpha1.Instance{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      instanceName,
@@ -310,9 +354,25 @@ func createInstance(instanceName, cdbName, namespace, version, edition, extra st
 		},
 		Spec: v1alpha1.InstanceSpec{
 			// Keep the CDBName in the spec different from the CDB name in the image (GCLOUD).
-			// Doing this implicitly test the CDB renaming feature.
+			// Doing this implicitly tests the CDB renaming feature.
 			CDBName:      cdbName,
 			DBUniqueName: cdbName,
+			PodSpec: commonv1alpha1.PodSpec{
+				Affinity: &corev1.Affinity{
+					PodAntiAffinity: &corev1.PodAntiAffinity{
+						PreferredDuringSchedulingIgnoredDuringExecution: []corev1.WeightedPodAffinityTerm{{
+							Weight: 1,
+							PodAffinityTerm: corev1.PodAffinityTerm{
+								LabelSelector: &metav1.LabelSelector{
+									MatchLabels: map[string]string{"task-type": podSpecLabel},
+								},
+								TopologyKey: "kubernetes.io/hostname",
+							},
+						},
+						},
+					},
+				},
+			},
 			InstanceSpec: commonv1alpha1.InstanceSpec{
 				Version:                          version,
 				RetainDisksAfterInstanceDeletion: retainDisksOnDelete,

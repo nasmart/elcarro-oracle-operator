@@ -22,7 +22,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
-	snapv1 "github.com/kubernetes-csi/external-snapshotter/v2/pkg/apis/volumesnapshot/v1beta1"
+	snapv1 "github.com/kubernetes-csi/external-snapshotter/client/v4/apis/volumesnapshot/v1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -317,6 +317,10 @@ func (r *InstanceReconciler) startStatefulSetPatching(req ctrl.Request, ctx cont
 
 	// Delete existing stateful set
 	existingSTS, err := r.retrieveStatefulSetByName(ctx, req.Namespace, stsParams.StsName)
+	if err != nil {
+		r.Log.Error(err, "failed to retrieve StatefulSet")
+		return ctrl.Result{}, err, false
+	}
 	if err := r.Delete(ctx, existingSTS); err != nil {
 		k8s.InstanceUpsertCondition(&inst.Status, k8s.Ready, v1.ConditionFalse, k8s.StatefulSetPatchingFailure, "Error while deleting STS")
 		return ctrl.Result{}, err, false
@@ -447,7 +451,11 @@ func (r *InstanceReconciler) isPatchingBackupCompleted(ctx context.Context, inst
 		if err != nil || snapshot.Status == nil {
 			return false, err
 		}
-		if !*snapshot.Status.ReadyToUse {
+		status := snapshot.Status
+		if status.Error != nil && status.Error.Message != nil {
+			return false, fmt.Errorf("Snapshot Error: %s", *status.Error.Message)
+		}
+		if status.ReadyToUse != nil && !*status.ReadyToUse {
 			return false, nil
 		}
 	}

@@ -84,7 +84,6 @@ var _ = BeforeSuite(func() {
 	testhelpers.EnableGsmApi()
 	testhelpers.EnableIamApi()
 	prepareTestUsersAndGrantAccess()
-	testhelpers.EnableWiWithNodePool()
 })
 
 // In case of Ctrl-C clean up the last valid k8sEnv.
@@ -255,6 +254,9 @@ var _ = Describe("User operations", func() {
 	})
 	Context("Oracle 18c XE", func() {
 		testUpdateUser("18c", "XE")
+	})
+	Context("Oracle 23c FREE", func() {
+		testUpdateUser("23c", "FREE")
 	})
 })
 
